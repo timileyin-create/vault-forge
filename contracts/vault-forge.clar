@@ -217,3 +217,131 @@
     )
   )
 )
+
+;; Collateral withdrawal with safety validation
+;; Withdraws collateral while maintaining healthy position ratios
+(define-public (withdraw (amount uint))
+  (let (
+      (user-pos (default-to {
+        total-collateral: u0,
+        total-borrowed: u0,
+        loan-count: u0,
+      }
+        (map-get? user-positions { user: tx-sender })
+      ))
+      (collateral (get total-collateral user-pos))
+      (borrowed (get total-borrowed user-pos))
+    )
+    (if (and
+        (<= amount collateral)
+        (>= (get-collateral-ratio (- collateral amount) borrowed)
+          (var-get minimum-collateral-ratio)
+        )
+      )
+      (begin
+        (try! (as-contract (stx-transfer? amount (as-contract tx-sender) tx-sender)))
+        (var-set total-deposits (- (var-get total-deposits) amount))
+        (update-user-position tx-sender amount false u0 true)
+        (ok amount)
+      )
+      ERR-INSUFFICIENT-COLLATERAL
+    )
+  )
+)
+
+;; Liquidation mechanism for risk management
+;; Liquidates under-collateralized positions to protect protocol
+(define-public (liquidate (user principal))
+  (let (
+      (user-pos (unwrap! (map-get? user-positions { user: user }) ERR-LOAN-NOT-FOUND))
+      (collateral (get total-collateral user-pos))
+      (borrowed (get total-borrowed user-pos))
+      (ratio (get-collateral-ratio collateral borrowed))
+    )
+    (asserts! (not (is-eq user tx-sender)) ERR-NOT-AUTHORIZED)
+    (asserts! (> borrowed u0) ERR-INVALID-AMOUNT)
+    (if (< ratio (var-get liquidation-threshold))
+      (begin
+        (try! (as-contract (stx-transfer? collateral (as-contract tx-sender) tx-sender)))
+        (map-delete user-positions { user: user })
+        (var-set total-deposits (- (var-get total-deposits) collateral))
+        (var-set total-borrows (- (var-get total-borrows) borrowed))
+        (ok true)
+      )
+      ERR-LIQUIDATION-FAILED
+    )
+  )
+)
+
+;; READ-ONLY QUERY FUNCTIONS
+
+;; User position analytics
+;; Retrieves comprehensive user position data
+(define-read-only (get-user-position (user principal))
+  (default-to {
+    total-collateral: u0,
+    total-borrowed: u0,
+    loan-count: u0,
+  }
+    (map-get? user-positions { user: user })
+  )
+)
+
+;; Protocol metrics dashboard
+;; Provides real-time protocol statistics and parameters
+(define-read-only (get-protocol-stats)
+  {
+    total-deposits: (var-get total-deposits),
+    total-borrows: (var-get total-borrows),
+    minimum-collateral-ratio: (var-get minimum-collateral-ratio),
+    liquidation-threshold: (var-get liquidation-threshold),
+    protocol-fee: (var-get protocol-fee),
+  }
+)
+
+;; ADMINISTRATIVE FUNCTIONS
+
+;; Collateral ratio governance
+;; Updates minimum collateral ratio with bounds checking
+(define-public (set-minimum-collateral-ratio (new-ratio uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+    (asserts!
+      (and
+        (>= new-ratio MIN-COLLATERAL-RATIO)
+        (<= new-ratio MAX-COLLATERAL-RATIO)
+      )
+      ERR-INVALID-PARAMETER
+    )
+    (var-set minimum-collateral-ratio new-ratio)
+    (ok true)
+  )
+)
+
+;; Liquidation threshold management
+;; Updates liquidation threshold with validation
+(define-public (set-liquidation-threshold (new-threshold uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+    (asserts!
+      (and
+        (>= new-threshold MIN-COLLATERAL-RATIO)
+        (<= new-threshold (var-get minimum-collateral-ratio))
+      )
+      ERR-INVALID-PARAMETER
+    )
+    (var-set liquidation-threshold new-threshold)
+    (ok true)
+  )
+)
+
+;; Protocol fee administration
+;; Updates protocol fee with maximum limit enforcement
+(define-public (set-protocol-fee (new-fee uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+    (asserts! (<= new-fee MAX-PROTOCOL-FEE) ERR-INVALID-PARAMETER)
+    (var-set protocol-fee new-fee)
+    (ok true)
+  )
+)
